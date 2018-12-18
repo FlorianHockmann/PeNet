@@ -39,6 +39,14 @@ namespace PeNet.Test.Authenticode
         }
 
         [Fact]
+        public void IsSignatureValid_SignedButManipulatedBinary_ReturnsFalse()
+        {
+            var peFile = new PeFile(@"../../../Binaries/firefox_x64_manipulated.exe");
+            Assert.NotNull(peFile.PKCS7);
+            Assert.False(peFile.IsSignatureValid);
+        }
+
+        [Fact]
         public void IsSignatureValid_SigendBinary_x86Other_ReturnsTrue()
         {
             var peFile = new PeFile(@"../../../Binaries/pidgin.exe");

@@ -1,8 +1,9 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
+#if NETSTANDARD2_0
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
+#endif
+using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
 using PeNet.Asn1;
 using PeNet.Utilities;
@@ -28,7 +29,7 @@ namespace PeNet.Authenticode
             _contentInfo = new ContentInfo(_peFile.WinCertificate.bCertificate);
             SignerSerialNumber = GetSigningSerialNumber();
             SignedHash = GetSignedHash();
-            IsAuthenticodeValid = CheckSignature();
+            IsAuthenticodeValid = VerifySignature();
             SigningCertificate = GetSigningCertificate();
         }
 
@@ -64,33 +65,21 @@ namespace PeNet.Authenticode
                 string.Equals(cert.SerialNumber, SignerSerialNumber, StringComparison.CurrentCultureIgnoreCase));
         }
 
-        private bool CheckSignature()
+        private bool VerifySignature()
         {
-            if (SignedHash == null) return false;
-            // 2.  Initialize a hash algorithm context.
-            HashAlgorithm ha;
-            switch (SignedHash.Length)
+            var signedCms = new SignedCms();
+            signedCms.Decode(_peFile.WinCertificate.bCertificate);
+            try
             {
-                case 16:
-                    ha = MD5.Create();
-                    break;
-                case 20:
-                    ha = SHA1.Create();
-                    break;
-                case 32:
-                    ha = SHA256.Create();
-                    break;
-                case 48:
-                    ha = SHA384.Create();
-                    break;
-                case 64:
-                    ha = SHA512.Create();
-                    break;
-                default:
-                    return false;
+                signedCms.CheckSignature(true);
             }
-            var hash = GetHash(ha);
-            return SignedHash.SequenceEqual(hash);
+            catch (Exception)
+            {
+                // the signature was not valid
+                return false;
+            }
+
+            return true;
         }
 
         private byte[] GetSignedHash()
@@ -116,62 +105,6 @@ namespace PeNet.Authenticode
             var asn1 = _contentInfo.Content;
             var x = (Asn1Integer)asn1.Nodes[0].Nodes[4].Nodes[0].Nodes[1].Nodes[1]; // ASN.1 Path to signer serial number: /1/0/4/0/1/1
             return x.Value.ToHexString().Substring(2).ToUpper();
-        }
-
-        private IEnumerable<byte> GetHash(HashAlgorithm hash)
-        {
-            // 3.  Hash the image header from its base to immediately before the start of the checksum address, 
-            // as specified in Optional Header Windows-Specific Fields.
-            var offset = Convert.ToInt32(_peFile.ImageNtHeaders.OptionalHeader.Offset) + 0x40;
-            hash.TransformBlock(_peFile.Buff, 0, offset, new byte[offset], 0);
-
-            // 4.  Skip over the checksum, which is a 4-byte field.
-            offset += 0x4;
-
-            // 6.  Get the Attribute Certificate Table address and size from the Certificate Table entry. 
-            // For details, see section 5.7 of the PE/COFF specification.
-            var certificateTable = _peFile.ImageNtHeaders.OptionalHeader.DataDirectory[4];
-
-            // 5.  Hash everything from the end of the checksum field to immediately before the start of the Certificate Table entry,
-            // as specified in Optional Header Data Directories.
-            var length = Convert.ToInt32(certificateTable.Offset) - offset;
-            hash.TransformBlock(_peFile.Buff, offset, length, new byte[length], 0);
-            offset += length + 0x8;//end of Attribute Certificate Table addres
-
-            // 7.  Exclude the Certificate Table entry from the calculation and 
-            // hash everything from the end of the Certificate Table entry to the end of image header, 
-            // including Section Table (headers). The Certificate Table entry is 8 bytes long, as specified in Optional Header Data Directories.
-            length = Convert.ToInt32(_peFile.ImageNtHeaders.OptionalHeader.SizeOfHeaders) - offset;// end optional header
-            hash.TransformBlock(_peFile.Buff, offset, length, new byte[length], 0);
-
-            // 8-13. Hash everything between end of header and certificate
-            var sizeOfHeaders = Convert.ToInt32(_peFile.ImageNtHeaders.OptionalHeader.SizeOfHeaders);
-            length = Convert.ToInt32(_peFile.WinCertificate.Offset) - sizeOfHeaders;
-            hash.TransformBlock(_peFile.Buff, sizeOfHeaders, length, new byte[length], 0);
-
-            // 14. Create a value called FILE_SIZE, which is not part of the signature. 
-            // Set this value to the image’s file size, acquired from the underlying file system. 
-            // If FILE_SIZE is greater than SUM_OF_BYTES_HASHED, the file contains extra data that must be added to the hash. 
-            // This data begins at the SUM_OF_BYTES_HASHED file offset, and its length is:
-            // (File Size) – ((Size of AttributeCertificateTable) + SUM_OF_BYTES_HASHED)
-            // Note: The size of Attribute Certificate Table is specified 
-            // in the second ULONG value in the Certificate Table entry (32 bit: offset 132, 64 bit: offset 148) in Optional Header Data Directories.
-            // 14. Hash everything from the end of the certificate to the end of the file.
-            var fileSize = _peFile.Buff.Length;
-            var sizeOfAttributeCertificateTable = Convert.ToInt32(certificateTable.Size);
-            offset = sizeOfAttributeCertificateTable + Convert.ToInt32(_peFile.WinCertificate.Offset);
-            if (fileSize > offset)
-            {
-                length = fileSize - offset;
-                if (length != 0)
-                {
-                    hash.TransformBlock(_peFile.Buff, offset, length, new byte[length], 0);
-                }
-            }
-
-            // 15. Finalize the hash algorithm context.
-            hash.TransformFinalBlock(_peFile.Buff, 0, 0);
-            return hash.Hash;
         }
     }
 }
